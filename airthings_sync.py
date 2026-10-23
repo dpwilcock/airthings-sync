@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import sys
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -23,24 +24,31 @@ import psycopg2
 import psycopg2.extras
 import requests
 
-import os
-
 
 def get_secret(name):
     """Read a secret from the environment (swap in your own secret store)."""
     return os.environ[name]
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
-CLIENT_ID     = get_secret("AIRTHINGS_CLIENT_ID")
-CLIENT_SECRET = get_secret("AIRTHINGS_CLIENT_SECRET")
+def init_auth():
+    """Load API credentials. Called after arg parsing so --help/-h never needs secrets."""
+    global CLIENT_ID, CLIENT_SECRET
+    CLIENT_ID     = get_secret("AIRTHINGS_CLIENT_ID")
+    CLIENT_SECRET = get_secret("AIRTHINGS_CLIENT_SECRET")
 
+
+# ── Config ────────────────────────────────────────────────────────────────────
 TOKEN_URL  = "https://accounts-api.airthings.com/v1/token"
 API_BASE   = "https://ext-api.airthings.com/v1"
 DB_DSN     = os.environ.get("PG_DSN", "dbname=postgres host=localhost")
+LOG_FILE   = os.environ.get("LOG_FILE", os.path.expanduser("~/logs/airthings_sync.log"))
+
+try:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+except OSError:
+    pass
 
 SAMPLES_PER_PAGE = 1000
-LOG_FILE         = "/tmp/airthings_sync.log"
 MAX_PAGES_PER_RUN = 80   # cap per-device pages per invocation so one device can't hog the whole run / crash into rate-limit death spiral
 MAX_RETRY_ATTEMPTS = 6   # lower than before — fail fast and gracefully instead of burning ~35min into a crash
 
@@ -480,6 +488,8 @@ def main():
     parser.add_argument("--gap-end", help="ISO date/time (UTC) to end a targeted gap-fill, e.g. 2026-04-29")
     args = parser.parse_args()
 
+    init_auth()
+
     db = get_db()
 
     if args.status:
@@ -511,9 +521,11 @@ def main():
     devices      = devices_data.get("devices", [])
     log.info("Found %d device(s)", len(devices))
 
-    # Nanny's device (2960107305) is out of scope — Duncan doesn't want it backfilled
-    # or kept up to date. Skip it unless explicitly requested with --device.
-    EXCLUDED_DEVICE_IDS = {"2960107305"}
+    # Skip excluded device(s) unless explicitly requested with --device.
+    # Set EXCLUDED_DEVICE_IDS via env var (comma-separated) if you want to skip any.
+    EXCLUDED_DEVICE_IDS = {
+        x.strip() for x in os.environ.get("AIRTHINGS_EXCLUDED_DEVICES", "").split(",") if x.strip()
+    }
     if not args.device:
         before = len(devices)
         devices = [d for d in devices if d["id"] not in EXCLUDED_DEVICE_IDS]
